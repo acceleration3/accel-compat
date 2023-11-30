@@ -1,0 +1,740 @@
+#ifndef ACCEL_COMPAT_HEADER
+#define ACCEL_COMPAT_HEADER
+
+#include <cstddef>
+#include <cstring>
+#include <limits>
+#include <streambuf>
+#include <type_traits>
+#include <array>
+#include <string>
+#include <tuple>
+
+#include <accel/macros>
+
+namespace accel
+{
+    // -------------------------------------------------------------------------------------
+    // Integer sequences
+    // -------------------------------------------------------------------------------------
+
+    template<typename T, T... Ints>
+    struct integer_sequence
+    {
+        typedef T value_type;
+        static constexpr std::size_t size() { return sizeof...(Ints); }
+    };
+    
+    template<std::size_t... Ints>
+    using index_sequence = integer_sequence<std::size_t, Ints...>;
+    
+    template<typename T, std::size_t N, T... Is>
+    struct make_integer_sequence : make_integer_sequence<T, N-1, N-1, Is...> {};
+    
+    template<typename T, T... Is>
+    struct make_integer_sequence<T, 0, Is...> : integer_sequence<T, Is...> {};
+    
+    template<std::size_t N>
+    using make_index_sequence = make_integer_sequence<std::size_t, N>;
+    
+    template<typename... T>
+    using index_sequence_for = make_index_sequence<sizeof...(T)>;
+
+
+
+    // -------------------------------------------------------------------------------------
+    // Views
+    // -------------------------------------------------------------------------------------
+
+    template<typename T>
+    constexpr T* addressof(T& object) 
+    {
+        return reinterpret_cast<T*>(&reinterpret_cast<char&>(object));
+    }
+
+    constexpr static std::size_t dynamic_extent = std::numeric_limits<std::size_t>::max();
+
+    template<typename T, std::size_t Extent = dynamic_extent>
+    class span
+    {
+    public:
+        using element_type = T;
+        using size_type = std::size_t;
+        using difference_type = std::ptrdiff_t;
+        using pointer = T*;
+        using iterator = pointer;
+        using reference = T&;
+
+        static constexpr size_type extent = Extent;
+
+        template<std::size_t E = Extent, typename std::enable_if<(E == dynamic_extent), int>::type = 0>
+        constexpr span() : 
+            m_pointer(nullptr),
+            m_size(0) {}
+
+        template<typename It>
+        constexpr span(It first, size_type count) :
+             m_pointer(first),
+             m_size(count) {}
+
+        template<typename It>
+        constexpr span(It first, It last) :
+             m_pointer(first),
+             m_size(last - first) {}
+
+        template<std::size_t Size, typename std::enable_if<(Extent == dynamic_extent || Extent == Size), int>::type = 0>
+        constexpr explicit span(element_type(&array)[Size]) :
+            m_pointer(array),
+            m_size(Size) {}
+
+        template<typename OtherType, std::size_t Size, std::size_t E = Extent, typename std::enable_if<(E == dynamic_extent || E == Size), int>::type = 0>
+        constexpr explicit span(const std::array<OtherType, Size>& array) :
+            m_pointer(array.data()),
+            m_size(Size) {}
+
+        template<typename OtherType, std::size_t Size, std::size_t E = Extent, typename std::enable_if<(E == dynamic_extent || E == Size), int>::type = 0>
+        constexpr explicit span(std::array<OtherType, Size>& array) :
+            m_pointer(array.data()),
+            m_size(Size) {}
+        
+        template<typename ContainerT, std::size_t E = Extent, typename std::enable_if<(E == dynamic_extent), int>::type = 0>
+        constexpr explicit span(const ContainerT& container) :
+            m_pointer(container.data()),
+            m_size(container.size()) {}
+
+        ~span() = default;
+
+        span(span&& other) : 
+            m_pointer(other.m_pointer), m_size(other.m_size)
+        {
+            other.m_pointer = nullptr;
+            other.m_size = 0;
+        }
+
+        span& operator=(span&& other) noexcept
+        {
+            if (this != &other)
+            {
+                m_pointer = other.m_pointer;
+                m_size = other.m_size;
+                other.m_pointer = nullptr;
+                other.m_size = 0;
+            }
+            return *this;
+        }
+
+        template<std::size_t OtherExtent, typename std::enable_if<(Extent == dynamic_extent || Extent == OtherExtent), int>::type = 0>
+        constexpr span(const span<T, OtherExtent>& other) :
+            m_pointer(other.m_pointer),
+            m_size(other.m_size) {}
+
+        constexpr pointer get_data() const { return m_pointer; }
+        constexpr size_type get_size() const { return m_size; }
+        constexpr size_type get_size_bytes() const { return m_size * sizeof(element_type); }
+
+        template<std::size_t Size> 
+        constexpr span<T, Size> get_first() const { return { m_pointer, Size }; }
+        constexpr span<element_type, dynamic_extent> get_first(size_type size) const { return { m_pointer, size }; }
+
+        template<std::size_t Size> 
+        constexpr span<T, Size> get_last() const { return { m_pointer + (m_size - Size), Size }; }
+        constexpr span<element_type, dynamic_extent> get_last(size_type size) const { return { m_pointer + (m_size - size), size }; }
+
+        template <std::size_t Offset, std::size_t Size = dynamic_extent>
+        using subspan_type = span<T, Size != dynamic_extent ? Size : (Extent != dynamic_extent ? Extent - Offset: dynamic_extent)>;
+
+        template <std::size_t Offset, std::size_t Size = dynamic_extent>
+        constexpr subspan_type<Offset, Size> get_subspan() const
+        {
+            return { get_data() + Offset, Size != dynamic_extent ? Size : get_size() - Offset };
+        }
+
+        constexpr span<element_type, dynamic_extent> get_subspan(size_type offset, size_type size = dynamic_extent) const
+        {
+            return { get_data() + offset, size == dynamic_extent ? get_size() - offset : size };
+        }
+
+        constexpr bool is_empty() const { return m_size == 0; }
+
+        constexpr iterator begin() const { return m_pointer; }
+        constexpr iterator end() const { return m_pointer + m_size; }
+
+        constexpr reference front() const { return *m_pointer; }
+        constexpr reference back() const { return *(m_pointer + (m_size - 1)); }
+
+        constexpr reference operator[](size_type index) const { return *(m_pointer + index); }
+
+        constexpr bool operator==(const span& other) const
+        {
+            return m_size == other.size && std::equal(begin(), end(), other.begin());
+        }
+        constexpr bool operator!=(const span& other) const { return !(*this == other); }
+    
+    protected:
+        pointer m_pointer;
+        size_type m_size;
+    };
+
+    template<class ForwardIt1, class ForwardIt2>
+    ForwardIt1 search(ForwardIt1 first, ForwardIt1 last, ForwardIt2 s_first, ForwardIt2 s_last)
+    {
+        while (true)
+        {
+            ForwardIt1 it = first;
+            for (ForwardIt2 s_it = s_first; ; ++it, ++s_it)
+            {
+                if (s_it == s_last)
+                    return first;
+                if (it == last)
+                    return last;
+                if (!(*it == *s_it))
+                    break;
+            }
+            ++first;
+        }
+    }
+
+    template<typename CharT>
+    class string_view_base : public span<const CharT>
+    {
+    public:
+        constexpr static std::size_t npos = std::numeric_limits<std::size_t>::max();
+
+        using span_type = span<const CharT>;
+        using element_type = typename span_type::element_type;
+        using size_type = typename span_type::size_type;
+        using difference_type = typename span_type::difference_type;
+        using pointer = typename span_type::pointer;
+        using iterator = typename span_type::iterator;
+        using reference = typename span_type::reference;
+        using char_traits = std::char_traits<CharT>;
+
+        string_view_base() {}
+
+        explicit string_view_base(const CharT* data) :
+            span_type(data, char_traits::length(data)) {}
+
+        template<std::size_t StringSize>
+        string_view_base(const CharT(&data)[StringSize]) :
+            span_type(data, StringSize) {}
+
+        template<std::size_t StringSize>
+        string_view_base(CharT* data, std::size_t size) :
+            span_type(data, size) {}
+
+        string_view_base(const std::basic_string<CharT>& string) :
+            span_type(string.data(), string.size()) {}
+
+        string_view_base substr(size_type offset, size_type size) const
+        {
+            return string_view_base { span_type::m_pointer + offset, size };
+        }
+
+        size_type copy(CharT* dest, size_type count, size_type pos = 0) const
+        {
+            size_type rlen = std::min(count, span_type::m_size - pos);
+            char_traits::copy(dest, span_type::m_pointer + pos, rlen);
+            return rlen;
+        }
+
+        int compare(string_view_base other) const
+        {
+            return char_traits::compare(span_type::m_pointer, other.m_pointer, std::min(span_type::m_size, other.m_size));
+        }
+
+        int compare(const CharT* string) const
+        {
+            return char_traits::compare(span_type::m_pointer, string, span_type::m_size);
+        }
+
+        int compare(size_type pos, size_type count, string_view_base view) const
+        {
+            return substr(pos, count).compare(view);
+        }
+
+        int compare(size_type pos1, size_type count1, string_view_base view, size_type pos2, size_type count2 ) const
+        {
+            return substr(pos1, count1).compare(view.substr(pos2, count2));
+        }
+
+        int compare(size_type pos, size_type count, const CharT* string) const
+        {
+            return substr(pos, count).compare(string);
+        }
+
+        int compare(size_type pos1, size_type count1, const CharT* string, size_type count2) const
+        {
+            return substr(pos1, count1).compare(string_view_base(string, count2));
+        }
+
+        bool starts_with(string_view_base other) const
+        {
+            return span_type::m_size >= other.m_size && char_traits::compare(span_type::m_pointer, other.m_pointer, other.m_size) == 0;
+        }
+
+        bool starts_with(CharT character) const
+        {
+            return span_type::m_size >= 1 && span_type::m_pointer[0] == character;
+        }
+
+        bool starts_with(const CharT* string) const
+        {
+            return starts_with(string_view_base(string));
+        }
+
+        bool ends_with(string_view_base view) const
+        {
+            return span_type::m_size >= view.m_size && char_traits::compare(span_type::m_pointer + (span_type::m_size - view.m_size), view.m_pointer, view.m_size) == 0;
+        }
+
+        bool ends_with(CharT character) const
+        {
+            return span_type::m_size >= 1 && span_type::m_pointer[span_type::m_size - 1] == character;
+        }
+
+        bool ends_with(const CharT* string) const
+        {
+            return ends_with(string_view_base(string));
+        }
+
+        bool contains(string_view_base view) const
+        {
+            return find(view) != npos;
+        }
+
+        bool contains(CharT character) const
+        {
+            return find(character) != npos;
+        }
+
+        bool contains(const CharT* string) const
+        {
+            return find(string) != npos;
+        }
+
+        size_type find(string_view_base view, size_type pos = 0) const
+        {
+            if (view.m_size == 0)
+                return pos;
+            if (view.m_size > span_type::m_size)
+                return npos;
+
+            const CharT* it = search(span_type::m_pointer + pos, span_type::m_pointer + span_type::m_size, view.m_pointer, view.m_pointer + view.m_size);
+            return it != span_type::m_pointer + span_type::m_size ? it - span_type::m_pointer : npos;
+        }
+        
+        size_type find(CharT character, size_type pos = 0) const
+        {
+            return find(string_view_base(&character, 1), pos);
+        }
+
+        size_type find(const CharT* string, size_type pos, size_type count) const
+        {
+            return find(string_view_base(string, count), pos);
+        }
+
+        size_type find(const CharT* string, size_type pos = 0) const
+        {
+            return find(string_view_base(string), pos);
+        }
+
+        size_type rfind(string_view_base view, size_type pos = npos) const
+        {
+            if (view.m_size == 0)
+                return pos;
+            if (view.m_size > span_type::m_size)
+                return npos;
+
+            const CharT* it = search(span_type::m_pointer + std::min(pos, span_type::m_size - view.m_size), span_type::m_pointer + span_type::m_size, view.m_pointer, view.m_pointer + view.m_size);
+            return it != span_type::m_pointer + span_type::m_size ? it - span_type::m_pointer : npos;
+        }
+
+        size_type rfind(CharT character, size_type pos = npos) const
+        {
+            return rfind(string_view_base(&character, 1), pos);
+        }
+
+        size_type rfind(const CharT* string, size_type pos, size_type count) const
+        {
+            return rfind(string_view_base(string, count), pos);
+        }
+
+        size_type rfind(const CharT* string, size_type pos = npos) const
+        {
+            return rfind(string_view_base(string), pos);
+        }
+
+        size_type find_first_of(string_view_base view, size_type pos = 0) const
+        {
+            if (view.m_size == 0)
+                return npos;
+
+            for (size_type i = pos; i < span_type::m_size; i++)
+                if (view.contains(span_type::m_pointer[i]))
+                    return i;
+            return npos;
+        }
+
+        size_type find_first_of(CharT character, size_type pos = 0) const
+        {
+            return find_first_of(string_view_base(&character, 1), pos);
+        }
+
+        size_type find_first_of(const CharT* string, size_type pos, size_type count) const
+        {
+            return find_first_of(string_view_base(string, count), pos);
+        }
+
+        size_type find_first_of(const CharT* string, size_type pos = 0) const
+        {
+            return find_first_of(string_view_base(string), pos);
+        }
+
+        size_type find_last_of(string_view_base view, size_type pos = npos) const
+        {
+            if (view.m_size == 0)
+                return npos;
+
+            for (size_type i = std::min(pos, span_type::m_size - 1); i >= 0; i--)
+                if (view.contains(span_type::m_pointer[i]))
+                    return i;
+            return npos;
+        }
+
+        size_type find_last_of(CharT character, size_type pos = npos) const
+        {
+            return find_last_of(string_view_base(&character, 1), pos);
+        }
+
+        size_type find_last_of(const CharT* string, size_type pos, size_type count) const
+        {
+            return find_last_of(string_view_base(string, count), pos);
+        }
+
+        size_type find_last_of(const CharT* string, size_type pos = npos) const
+        {
+            return find_last_of(string_view_base(string), pos);
+        }
+
+        size_type find_first_not_of(string_view_base view, size_type pos = 0) const
+        {
+            if (view.m_size == 0)
+                return pos;
+
+            for (size_type i = pos; i < span_type::m_size; i++)
+                if (!view.contains(span_type::m_pointer[i]))
+                    return i;
+            return npos;
+        }
+
+        size_type find_first_not_of(CharT character, size_type pos = 0) const
+        {
+            return find_first_not_of(string_view_base(&character, 1), pos);
+        }
+
+        size_type find_first_not_of(const CharT* string, size_type pos, size_type count) const
+        {
+            return find_first_not_of(string_view_base(string, count), pos);
+        }
+
+        size_type find_first_not_of(const CharT* string, size_type pos = 0) const
+        {
+            return find_first_not_of(string_view_base(string), pos);
+        }
+
+        size_type find_last_not_of(string_view_base view, size_type pos = npos) const
+        {
+            if (view.m_size == 0)
+                return pos;
+
+            for (size_type i = std::min(pos, span_type::m_size - 1); i >= 0; i--)
+                if (!view.contains(span_type::m_pointer[i]))
+                    return i;
+            return npos;
+        }
+
+        size_type find_last_not_of(CharT character, size_type pos = npos) const
+        {
+            return find_last_not_of(string_view_base(&character, 1), pos);
+        }
+
+        size_type find_last_not_of(const CharT* string, size_type pos, size_type count) const
+        {
+            return find_last_not_of(string_view_base(string, count), pos);
+        }
+
+        size_type find_last_not_of(const CharT* string, size_type pos = npos) const
+        {
+            return find_last_not_of(string_view_base(string), pos);
+        }
+
+        bool operator==(const string_view_base& other) const
+        {
+            return span_type::m_size == other.m_size && char_traits::compare(span_type::m_pointer, other.m_pointer, span_type::m_size) == 0;
+        }
+
+        bool operator!=(const string_view_base& other) const
+        {
+            return !(*this == other);
+        }
+
+        bool operator<(const string_view_base& other) const
+        {
+            return char_traits::compare(span_type::m_pointer, other.m_pointer, std::min(span_type::m_size, other.m_size)) < 0;
+        }
+
+        bool operator<=(const string_view_base& other) const
+        {
+            return char_traits::compare(span_type::m_pointer, other.m_pointer, std::min(span_type::m_size, other.m_size)) <= 0;
+        }
+
+        bool operator>(const string_view_base& other) const
+        {
+            return char_traits::compare(span_type::m_pointer, other.m_pointer, std::min(span_type::m_size, other.m_size)) > 0;
+        }
+
+        bool operator>=(const string_view_base& other) const
+        {
+            return char_traits::compare(span_type::m_pointer, other.m_pointer, std::min(span_type::m_size, other.m_size)) >= 0;
+        }
+
+        const CharT& operator[](size_type index) const
+        {
+            return span_type::m_pointer[index];
+        }
+
+        const CharT& at(size_type index) const
+        {
+            return span_type::m_pointer[index];
+        }
+
+        const CharT& front() const
+        {
+            return span_type::m_pointer[0];
+        }
+
+        const CharT& back() const
+        {
+            return span_type::m_pointer[span_type::m_size - 1];
+        }
+
+        const CharT* data() const
+        {
+            return span_type::m_pointer;
+        }
+
+        const CharT* c_str() const
+        {
+            return span_type::m_pointer;
+        }
+
+        constexpr operator span<const CharT>() const
+        {
+            return { span_type::m_pointer, span_type::m_size };
+        }
+
+        operator std::basic_string<CharT>() const
+        {
+            return std::basic_string<CharT>(span_type::m_pointer, span_type::m_size);
+        }
+
+        std::basic_streambuf<CharT> operator<<(std::basic_streambuf<CharT>& stream) const
+        {
+            return stream.sputn(span_type::m_pointer, span_type::m_size);
+        }
+    };
+
+    using string_view = string_view_base<char>;
+    using wstring_view = string_view_base<wchar_t>;
+
+
+    
+    // -------------------------------------------------------------------------------------
+    // Variant
+    // -------------------------------------------------------------------------------------
+
+    namespace details
+    {
+        template<typename T>
+        constexpr T get_element(const T* arr, std::size_t index)
+        {
+            return arr[index];
+        }
+
+        template<typename T>
+        constexpr T max_impl(const T* arr, std::size_t size, std::size_t index)
+        {
+            return index == size ? T{} : get_element(arr, index) > max_impl(arr, size, index + 1) ? get_element(arr, index) : max_impl(arr, size, index + 1);
+        }
+
+        template<typename T>
+        constexpr T max(std::initializer_list<T> list)
+        {
+            return max_impl(list.begin(), list.size(), 0);
+        }
+
+        template<class... Types>
+        struct aligned_union
+        {
+            static constexpr std::size_t alignment_value = max({alignof(Types)...});
+            static constexpr std::size_t size_value = max({sizeof(Types)...});
+
+            struct type
+            {
+                alignas(alignment_value) char _s[size_value];
+            };
+        };
+
+        template<typename T, typename... Us>
+        struct is_one_of : std::false_type {};
+
+        template<typename T, typename U, typename... Us>
+        struct is_one_of<T, U, Us...> : std::integral_constant<bool, std::is_same<T, U>::value || is_one_of<T, Us...>::value> {};
+
+        template<typename T, typename... Us>
+        struct index_of;
+
+        template<typename T, typename... Us>
+        struct index_of<T, T, Us...> : std::integral_constant<std::size_t, 0> {};
+
+        template<typename T, typename U, typename... Us>
+        struct index_of<T, U, Us...> : std::integral_constant<std::size_t, 1 + index_of<T, Us...>::value> {};
+    }
+
+    template<typename... Ts>
+    class variant
+    {
+    public:
+        static constexpr std::size_t size = sizeof...(Ts);
+
+        template<typename T, typename std::enable_if<details::is_one_of<T, Ts...>::value, int>::type = 0>
+        variant(T&& value) :
+            m_type_index(details::index_of<T, Ts...>::value)
+        {
+            new (&m_storage) T(std::forward<T>(value));
+        }
+
+        variant(const variant& other) :
+            m_type_index(other.m_type_index)
+        {
+            std::memcpy(&m_storage, &other.m_storage, sizeof(m_storage));
+        }
+
+        variant& operator=(const variant& other)
+        {
+            if (this != &other)
+            {
+                m_type_index = other.m_type_index;
+                std::memcpy(&m_storage, &other.m_storage, sizeof(m_storage));
+            }
+            return *this;
+        }
+
+        variant(variant&& other) noexcept :
+            m_type_index(other.m_type_index)
+        {
+            std::memcpy(&m_storage, &other.m_storage, sizeof(m_storage));
+        }
+
+        variant& operator=(variant&& other) noexcept
+        {
+            if (this != &other)
+            {
+                m_type_index = other.m_type_index;
+                std::memcpy(&m_storage, &other.m_storage, sizeof(m_storage));
+            }
+            return *this;
+        }
+
+        template<typename T>
+        void set(const T& value)
+        {
+            static_assert(details::is_one_of<T, Ts...>::value, "Type not in variant");
+
+            new (&m_storage) T(value);
+            m_type_index = details::index_of<T, Ts...>::value;
+        }
+
+        template<typename T>
+        T& get()
+        {
+            static_assert(details::is_one_of<T, Ts...>::value, "Type not in variant");
+            return get<details::index_of<T, Ts...>::value>(m_storage);
+        }
+
+        template<typename T>
+        const T& get() const
+        {
+            static_assert(details::is_one_of<T, Ts...>::value, "Type not in variant");
+            return get<details::index_of<T, Ts...>::value>(m_storage);
+        }
+
+        template<std::size_t I>
+        auto get() -> typename std::tuple_element<I, std::tuple<Ts...>>::type&
+        {
+            return get<I>(m_storage);
+        }
+
+        template<std::size_t I>
+        auto get() const -> typename std::tuple_element<I, std::tuple<Ts...>>::type&
+        {
+            return get<I>(m_storage);
+        }
+
+        std::size_t get_index() const 
+        { 
+            return m_type_index;
+        }
+
+    private:
+        using storage_type = typename details::aligned_union<Ts...>::type;
+        
+        storage_type m_storage;
+        std::size_t m_type_index;
+
+        template<std::size_t I>
+        auto get(storage_type& storage) -> typename std::tuple_element<I, std::tuple<Ts...>>::type&
+        {
+            return *reinterpret_cast<typename std::tuple_element<I, std::tuple<Ts...>>::type*>(&storage);
+        }
+    };
+
+    namespace details
+    {
+        template <typename VisitorT, typename VariantT, std::size_t I>
+        auto generate(VisitorT &&visitor, VariantT &variant, index_sequence<I>) -> 
+            decltype(visitor(variant.template get<I>())) 
+        {
+            if (variant.get_index() == I)
+                return visitor(variant.template get<I>());
+            return decltype(visitor(variant.template get<I>()))();
+        }
+
+        template <typename VisitorT, typename VariantT, std::size_t I, std::size_t... Is>
+        auto generate(VisitorT &&visitor, VariantT &variant, index_sequence<I, Is...>) -> 
+            decltype(visitor(variant.template get<I>()))
+        {
+            if (variant.get_index() == I)
+
+                return visitor(variant.template get<I>());
+            else
+                return generate(std::forward<VisitorT>(visitor), variant, index_sequence<Is...>{});
+        }
+
+        template <typename VisitorT, typename VariantT>
+        auto generate_jump_table(VisitorT &&visitor, VariantT &variant) -> 
+            decltype(generate(std::forward<VisitorT>(visitor), variant, make_index_sequence<VariantT::size>())) 
+        {
+            return generate(std::forward<VisitorT>(visitor), variant, make_index_sequence<VariantT::size>{});
+        }
+    };
+
+    template<typename VisitorT, typename VariantT>
+    static inline auto visit(VisitorT&& visitor, VariantT& variant) -> 
+        decltype(details::generate_jump_table(visitor, variant))
+    {
+        return details::generate_jump_table(visitor, variant);
+    }
+}
+
+#endif
